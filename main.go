@@ -2,13 +2,40 @@ package main
 
 import (
 	"./protocol"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io/ioutil"
 	"log"
 	"net"
 	"net/url"
+	"os"
+	"path"
+	"path/filepath"
 	"strings"
 )
+
+var config struct {
+	ListenOn string
+}
+
+var (
+	executableDir  = filepath.Dir(os.Args[0])
+	configFilename = path.Join(executableDir, "config.json")
+)
+
+func loadData(filename string, v interface{}) error {
+	data, err := ioutil.ReadFile(filename)
+	if err != nil {
+		return err
+	}
+
+	err = json.Unmarshal(data, v)
+	if err != nil {
+		return err
+	}
+	return nil
+}
 
 func transformURL(rawURL string) (string, string, error) {
 	url, err := url.Parse(rawURL)
@@ -39,6 +66,9 @@ func handleClient(clientConn net.Conn) error {
 	}
 	// TODO: Send error depending on error type
 
+	if request.Method == "CONNECT" {
+		return errors.New("CONNECT method is not implemented")
+	}
 	var addr string
 	addr, request.Url, err = transformURL(request.Url)
 	if err != nil {
@@ -74,8 +104,13 @@ func runHandleClient(clientConn net.Conn) {
 }
 
 func main() {
-	log.Printf("listening on 8080\n")
-	ln, err := net.Listen("tcp", ":8080")
+	err := loadData(configFilename, &config)
+	if err != nil {
+		log.Fatalf("can't load %s\n", configFilename)
+	}
+
+	log.Printf("listening on %s\n", config.ListenOn)
+	ln, err := net.Listen("tcp", config.ListenOn)
 	if err != nil {
 		log.Fatal("listen failed:", err.Error())
 	}

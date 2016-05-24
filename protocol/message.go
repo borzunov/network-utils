@@ -14,8 +14,9 @@ type Header struct {
 }
 
 type MessageBase struct {
-	Headers []Header
-	Body    []byte
+	Headers   []Header
+	Body      chan []byte
+	BodyError error
 }
 
 func (message *MessageBase) Header(key string) (string, bool) {
@@ -36,7 +37,7 @@ func (message *MessageBase) Header(key string) (string, bool) {
 func (message *MessageBase) SetHeader(key, value string) {
 	for i, header := range message.Headers {
 		if strings.EqualFold(header.Key, key) {
-			header.Value = value
+			message.Headers[i].Value = value
 
 			message.Headers = append(message.Headers[:i+1],
 				filterHeader(message.Headers[i+1:], key)...)
@@ -44,6 +45,11 @@ func (message *MessageBase) SetHeader(key, value string) {
 		}
 	}
 	message.Headers = append(message.Headers, Header{key, value})
+}
+
+func (message *MessageBase) Chunked() bool {
+	value, ok := message.Header("Transfer-Encoding")
+	return ok && strings.EqualFold(value, "chunked")
 }
 
 func filterHeader(headers []Header, key string) []Header {
@@ -58,6 +64,55 @@ func filterHeader(headers []Header, key string) []Header {
 
 func (message *MessageBase) DeleteHeader(key string) {
 	message.Headers = filterHeader(message.Headers, key)
+}
+
+func (message *MessageBase) readChunkFrom(conn *TextConn, length int) error {
+	buf := make([]byte, length)
+	err := conn.ReadAll(buf)
+	if err != nil {
+		return err
+	}
+	message.Body <- buf
+	return nil
+}
+
+func (message *MessageBase) readChunkedBodyFrom(conn *TextConn) error {
+	for {
+		line, err := conn.ReadLine()
+		if err != nil {
+			return errors.New("failed to read chunk length: " + err.Error())
+		}
+		length, err := strconv.ParseUint(line, 16, 32)
+		if err != nil {
+			return errors.New(fmt.Sprintf("can't parse chunk length %s", line))
+		}
+		if length == 0 {
+			break
+		}
+		err = message.readChunkFrom(conn, int(length))
+		if err != nil {
+			return errors.New("failed to read chunk data: " + err.Error())
+		}
+		_, err = conn.ReadLine()
+		if err != nil {
+			return errors.New("failed to read CRLF after chunk data: " + err.Error())
+		}
+	}
+	for {
+		line, err := conn.ReadLine()
+		if err != nil {
+			return errors.New("failed to read trailer: " + err.Error())
+		}
+		if line == "" {
+			break
+		}
+	}
+	return nil
+}
+
+func (message *MessageBase) runReadBody(method func(conn *TextConn) error, conn *TextConn) {
+	message.BodyError = method(conn)
+	close(message.Body)
 }
 
 func (message *MessageBase) ReadFrom(conn *TextConn) error {
@@ -76,9 +131,11 @@ func (message *MessageBase) ReadFrom(conn *TextConn) error {
 		}
 		message.Headers = append(message.Headers, Header{parts[0], parts[1]})
 	}
+	message.Body = make(chan []byte)
 
-	if value, ok := message.Header("Transfer-Encoding"); ok {
-		return errors.New(fmt.Sprintf(`Transfer-Encoding: %s is not supported`, value))
+	if message.Chunked() {
+		go message.runReadBody(message.readChunkedBodyFrom, conn)
+		return nil
 	}
 
 	length := 0
@@ -90,14 +147,65 @@ func (message *MessageBase) ReadFrom(conn *TextConn) error {
 			return errors.New("can't convert Content-Length to integer: " + err.Error())
 		}
 	}
+	go message.runReadBody(func(conn *TextConn) error {
+		return message.readChunkFrom(conn, length)
+	}, conn)
+	return nil
+}
 
-	message.Body = make([]byte, length)
-	return conn.ReadAll(message.Body)
+func (message *MessageBase) setHopByHopHeaders() {
+	if value, ok := message.Header("Connection"); ok {
+		for _, item := range strings.Split(value, ", ") {
+			if item != "close" {
+				message.DeleteHeader(item)
+			}
+		}
+	}
+	message.SetHeader("Connection", "close")
+
+	message.DeleteHeader("Upgrade")
+
+	// FIXME: Maybe support Trailer
+}
+
+func (message *MessageBase) writeChunkedBodyTo(conn *TextConn) error {
+	for chunk := range message.Body {
+		err := conn.WriteLine(strconv.FormatUint(uint64(len(chunk)), 16))
+		if err != nil {
+			return err
+		}
+		err = conn.WriteAll(chunk)
+		if err != nil {
+			return err
+		}
+		err = conn.WriteLine("")
+		if err != nil {
+			return err
+		}
+	}
+	// message.BodyError is ignored
+	err := conn.WriteLine("0")
+	if err != nil {
+		return err
+	}
+	// FIXME: we may send here trailing headers
+	return conn.WriteLine("")
 }
 
 func (message *MessageBase) WriteTo(conn *TextConn) error {
-	// TODO: Deal with Transfer-Encoding
-	message.SetHeader("Content-Length", strconv.Itoa(len(message.Body)))
+	var body []byte
+	if !message.Chunked() {
+		for part := range message.Body {
+			body = append(body, part...)
+		}
+		if message.BodyError != nil {
+			return message.BodyError
+		}
+		if _, ok := message.Header("Content-Length"); ok {
+			message.SetHeader("Content-Length", strconv.Itoa(len(body)))
+		}
+	}
+	message.setHopByHopHeaders()
 
 	for _, header := range message.Headers {
 		err := conn.WriteLine(header.Key + ": " + header.Value)
@@ -110,7 +218,10 @@ func (message *MessageBase) WriteTo(conn *TextConn) error {
 		return err
 	}
 
-	return conn.WriteAll(message.Body)
+	if !message.Chunked() {
+		return conn.WriteAll(body)
+	}
+	return message.writeChunkedBodyTo(conn)
 }
 
 func logMessage(conn *TextConn, write bool, startLine string) {
