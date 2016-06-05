@@ -57,10 +57,9 @@ func transformURL(rawURL string) (string, string, error) {
 
 func handleClient(clientConn net.Conn) error {
 	defer clientConn.Close()
-	clientTextConn := &protocol.TextConn{Conn: clientConn}
 
 	request := new(protocol.Request)
-	err := request.ReadFrom(clientTextConn)
+	err := request.ReadFrom(clientConn)
 	if err != nil {
 		return err
 	}
@@ -80,20 +79,19 @@ func handleClient(clientConn net.Conn) error {
 		return err
 	}
 	defer serverConn.Close()
-	serverTextConn := &protocol.TextConn{Conn: serverConn}
 
-	err = request.WriteTo(serverTextConn)
+	err = request.WriteTo(serverConn)
 	if err != nil {
 		return err
 	}
 
 	response := new(protocol.Response)
-	err = response.ReadFrom(serverTextConn)
+	err = response.ReadFrom(serverConn)
 	if err != nil {
 		return err
 	}
 
-	return response.WriteTo(clientTextConn)
+	return response.WriteTo(clientConn)
 }
 
 func runHandleClient(clientConn net.Conn) {
