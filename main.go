@@ -2,9 +2,11 @@ package main
 
 import (
 	"./protocol"
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"html/template"
 	"io/ioutil"
 	"log"
 	"net"
@@ -13,15 +15,21 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
-var config struct {
+const ServerName = "http-proxy"
+
+type Config struct {
 	ListenOn string
 }
 
 var (
+	config Config
+
 	executableDir  = filepath.Dir(os.Args[0])
 	configFilename = path.Join(executableDir, "config.json")
+	templateDir    = path.Join(executableDir, "templates")
 )
 
 func loadData(filename string, v interface{}) error {
@@ -36,6 +44,17 @@ func loadData(filename string, v interface{}) error {
 	}
 	return nil
 }
+
+func loadTemplate(name string) *template.Template {
+	path := path.Join(templateDir, name)
+	result, err := template.New(name).ParseFiles(path)
+	if err != nil {
+		log.Fatalf("failed to load %s: %s\n", path, err)
+	}
+	return result
+}
+
+var errorTemplate = loadTemplate("error.tpl")
 
 func transformURL(rawURL string) (string, string, error) {
 	url, err := url.Parse(rawURL)
@@ -55,49 +74,100 @@ func transformURL(rawURL string) (string, string, error) {
 	return host, url.String(), nil
 }
 
-func handleClient(clientConn net.Conn) error {
-	defer clientConn.Close()
-
+func handleClient(clientConn net.Conn) *protocol.Error {
 	request := new(protocol.Request)
 	err := request.ReadFrom(clientConn)
 	if err != nil {
-		return err
+		return &protocol.Error{protocol.StatusBadRequest, err}
 	}
-	// TODO: Send error depending on error type
 
 	if request.Method == "CONNECT" {
-		return errors.New("CONNECT method is not implemented")
+		return &protocol.Error{protocol.StatusNotImplemented, errors.New("CONNECT method is not implemented")}
 	}
 	var addr string
 	addr, request.Url, err = transformURL(request.Url)
 	if err != nil {
-		return err
+		return &protocol.Error{protocol.StatusBadRequest, err}
 	}
 
 	serverConn, err := net.Dial("tcp", addr)
 	if err != nil {
-		return err
+		return &protocol.Error{protocol.StatusBadGateway, err}
 	}
 	defer serverConn.Close()
 
 	err = request.WriteTo(serverConn)
 	if err != nil {
-		return err
+		return &protocol.Error{protocol.StatusBadGateway, err}
 	}
 
 	response := new(protocol.Response)
 	err = response.ReadFrom(serverConn)
 	if err != nil {
+		return &protocol.Error{protocol.StatusBadGateway, err}
+	}
+
+	err = response.WriteTo(clientConn)
+	if err != nil {
+		return &protocol.Error{0, err}
+	}
+	return nil
+}
+
+func sendErrorResponse(clientConn net.Conn, protocolErr *protocol.Error) error {
+	reason := protocol.StatusText[protocolErr.Status]
+	date := strings.Replace(time.Now().UTC().Format(time.RFC1123), "UTC", "GMT", 1)
+	response := &protocol.Response{
+		Protocol: "HTTP/1.0",
+		Code:     protocolErr.Status,
+		Reason:   reason,
+		MessageBase: protocol.MessageBase{
+			Headers: []protocol.Header{
+				{"Server", ServerName},
+				{"Date", date},
+				{"Content-Type", "text/html"},
+				{"Content-Length", "0"}, // WriteTo will recalculate it
+			},
+			Body: make(chan []byte, 1),
+		},
+	}
+
+	data := struct {
+		Status     int
+		Reason     string
+		Error      error
+		ServerName string
+		Config
+	}{
+		Status:     protocolErr.Status,
+		Reason:     reason,
+		Error:      protocolErr.Error,
+		ServerName: ServerName,
+		Config:     config,
+	}
+	body := new(bytes.Buffer)
+	err := errorTemplate.Execute(body, data)
+	if err != nil {
 		return err
 	}
+	response.Body <- body.Bytes()
+	close(response.Body)
 
 	return response.WriteTo(clientConn)
 }
 
 func runHandleClient(clientConn net.Conn) {
-	err := handleClient(clientConn)
-	if err != nil {
-		log.Println("error on handling a client:", err)
+	defer clientConn.Close()
+
+	protocolErr := handleClient(clientConn)
+	if protocolErr != nil {
+		log.Printf("error on handling a client (%d): %s\n", protocolErr.Status, protocolErr.Error)
+		if protocolErr.Status != 0 {
+			err := sendErrorResponse(clientConn, protocolErr)
+			if err != nil {
+				log.Println("error on sending a error response: " + err.Error())
+			}
+		}
 	}
 }
 
