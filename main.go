@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"html/template"
-	"io/ioutil"
 	"log"
 	"net"
 	"net/url"
@@ -33,16 +32,13 @@ var (
 )
 
 func loadData(filename string, v interface{}) error {
-	data, err := ioutil.ReadFile(filename)
+	f, err := os.Open(filename)
 	if err != nil {
 		return err
 	}
+	defer f.Close()
 
-	err = json.Unmarshal(data, v)
-	if err != nil {
-		return err
-	}
-	return nil
+	return json.NewDecoder(f).Decode(v)
 }
 
 func loadTemplate(name string) *template.Template {
@@ -116,22 +112,6 @@ func handleClient(clientConn net.Conn) *protocol.Error {
 
 func sendErrorResponse(clientConn net.Conn, protocolErr *protocol.Error) error {
 	reason := protocol.StatusText[protocolErr.Status]
-	date := strings.Replace(time.Now().UTC().Format(time.RFC1123), "UTC", "GMT", 1)
-	response := &protocol.Response{
-		Protocol: "HTTP/1.0",
-		Code:     protocolErr.Status,
-		Reason:   reason,
-		MessageBase: protocol.MessageBase{
-			Headers: []protocol.Header{
-				{"Server", ServerName},
-				{"Date", date},
-				{"Content-Type", "text/html"},
-				{"Content-Length", "0"}, // WriteTo will recalculate it
-			},
-			Body: make(chan []byte, 1),
-		},
-	}
-
 	data := struct {
 		Status     int
 		Reason     string
@@ -150,9 +130,22 @@ func sendErrorResponse(clientConn net.Conn, protocolErr *protocol.Error) error {
 	if err != nil {
 		return err
 	}
-	response.Body <- body.Bytes()
-	close(response.Body)
 
+	date := strings.Replace(time.Now().UTC().Format(time.RFC1123), "UTC", "GMT", 1)
+	response := &protocol.Response{
+		Protocol: "HTTP/1.0",
+		Code:     protocolErr.Status,
+		Reason:   reason,
+		MessageBase: protocol.MessageBase{
+			Headers: []protocol.Header{
+				{"Server", ServerName},
+				{"Date", date},
+				{"Content-Type", "text/html"},
+				{"Content-Length", "0"}, // WriteTo will recalculate it
+			},
+			BodyReader: body,
+		},
+	}
 	return response.WriteTo(clientConn)
 }
 
