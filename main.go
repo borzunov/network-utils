@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"html/template"
+	"io"
 	"log"
 	"net"
 	"net/url"
@@ -70,44 +71,100 @@ func transformURL(rawURL string) (string, string, error) {
 	return host, url.String(), nil
 }
 
-func handleClient(clientConn net.Conn) *protocol.Error {
+func defaultResponseHeaders() []protocol.Header {
+	date := strings.Replace(time.Now().UTC().Format(time.RFC1123), "UTC", "GMT", 1)
+	return []protocol.Header{
+		{"Server", ServerName},
+		{"Date", date},
+	}
+}
+
+func handleTunnel(clientConn *net.TCPConn, serverConn *net.TCPConn) error {
+	response := &protocol.Response{
+		Protocol: "HTTP/1.1",
+		Code:     protocol.StatusOK,
+		Reason:   protocol.StatusText[protocol.StatusOK],
+		MessageBase: protocol.MessageBase{
+			Headers:    defaultResponseHeaders(),
+			BodyReader: bytes.NewReader(nil),
+		},
+	}
+	err := response.WriteTo(clientConn)
+	if err != nil {
+		return err
+	}
+	log.Printf("established tunnel between %s and %s\n", clientConn.RemoteAddr(), serverConn.RemoteAddr())
+
+	go func() {
+		written, err := io.Copy(clientConn, serverConn)
+		serverConn.CloseRead()
+		clientConn.CloseWrite()
+		if err != nil {
+			log.Println("error on a tunnel: " + err.Error())
+		} else {
+			log.Printf("tunnel side closed, %d copied from %s to %s\n", written,
+				serverConn.RemoteAddr(), clientConn.RemoteAddr())
+		}
+	}()
+	written, err := io.Copy(serverConn, clientConn)
+	clientConn.CloseRead()
+	serverConn.CloseWrite()
+	if err != nil {
+		log.Println("error on a tunnel: " + err.Error())
+	} else {
+		log.Printf("tunnel side closed, %d copied from %s to %s\n", written,
+			clientConn.RemoteAddr(), serverConn.RemoteAddr())
+	}
+	return nil
+}
+
+func handleClient(clientConn net.Conn) (*protocol.Error, bool) {
 	request := new(protocol.Request)
 	err := request.ReadFrom(clientConn)
 	if err != nil {
-		return &protocol.Error{protocol.StatusBadRequest, err}
+		return &protocol.Error{protocol.StatusBadRequest, err}, false
 	}
 
-	if request.Method == "CONNECT" {
-		return &protocol.Error{protocol.StatusNotImplemented, errors.New("CONNECT method is not implemented")}
-	}
 	var addr string
-	addr, request.Url, err = transformURL(request.Url)
-	if err != nil {
-		return &protocol.Error{protocol.StatusBadRequest, err}
+	if request.Method == protocol.MethodConnect {
+		addr = request.Url
+		// TODO: Check that the address is not local
+	} else {
+		addr, request.Url, err = transformURL(request.Url)
+		if err != nil {
+			return &protocol.Error{protocol.StatusBadRequest, err}, false
+		}
 	}
 
 	serverConn, err := net.Dial("tcp", addr)
 	if err != nil {
-		return &protocol.Error{protocol.StatusBadGateway, err}
+		return &protocol.Error{protocol.StatusBadGateway, err}, false
+	}
+	if request.Method == protocol.MethodConnect {
+		err := handleTunnel(clientConn.(*net.TCPConn), serverConn.(*net.TCPConn))
+		if err != nil {
+			return &protocol.Error{0, err}, false
+		}
+		return nil, true
 	}
 	defer serverConn.Close()
 
 	err = request.WriteTo(serverConn)
 	if err != nil {
-		return &protocol.Error{protocol.StatusBadGateway, err}
+		return &protocol.Error{protocol.StatusBadGateway, err}, false
 	}
 
 	response := new(protocol.Response)
 	err = response.ReadFrom(serverConn)
 	if err != nil {
-		return &protocol.Error{protocol.StatusBadGateway, err}
+		return &protocol.Error{protocol.StatusBadGateway, err}, false
 	}
 
 	err = response.WriteTo(clientConn)
 	if err != nil {
-		return &protocol.Error{0, err}
+		return &protocol.Error{0, err}, false
 	}
-	return nil
+	return nil, false
 }
 
 func sendErrorResponse(clientConn net.Conn, protocolErr *protocol.Error) error {
@@ -131,18 +188,15 @@ func sendErrorResponse(clientConn net.Conn, protocolErr *protocol.Error) error {
 		return err
 	}
 
-	date := strings.Replace(time.Now().UTC().Format(time.RFC1123), "UTC", "GMT", 1)
 	response := &protocol.Response{
 		Protocol: "HTTP/1.0",
 		Code:     protocolErr.Status,
 		Reason:   reason,
 		MessageBase: protocol.MessageBase{
-			Headers: []protocol.Header{
-				{"Server", ServerName},
-				{"Date", date},
+			Headers: append(defaultResponseHeaders(), []protocol.Header{
 				{"Content-Type", "text/html"},
 				{"Content-Length", "0"}, // WriteTo will recalculate it
-			},
+			}...),
 			BodyReader: body,
 		},
 	}
@@ -150,9 +204,15 @@ func sendErrorResponse(clientConn net.Conn, protocolErr *protocol.Error) error {
 }
 
 func runHandleClient(clientConn net.Conn) {
-	defer clientConn.Close()
+	var keepConn bool
+	defer func() {
+		if !keepConn {
+			clientConn.Close()
+		}
+	}()
 
-	protocolErr := handleClient(clientConn)
+	var protocolErr *protocol.Error
+	protocolErr, keepConn = handleClient(clientConn)
 	if protocolErr != nil {
 		log.Printf("error on handling a client (%d): %s\n", protocolErr.Status, protocolErr.Error)
 		if protocolErr.Status != 0 {

@@ -1,6 +1,10 @@
 package protocol
 
+const MethodConnect = "CONNECT"
+
 const (
+	StatusOK = 200
+
 	StatusBadRequest = 400
 
 	StatusNotImplemented = 501
@@ -8,6 +12,8 @@ const (
 )
 
 var StatusText = map[int]string{
+	StatusOK: "OK",
+
 	StatusBadRequest: "Bad Request",
 
 	StatusNotImplemented: "Not implemented",
@@ -16,5 +22,5 @@ var StatusText = map[int]string{
 
 type Error struct {
 	Status int
-	Error error
+	Error  error
 }
