@@ -14,6 +14,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -21,11 +22,12 @@ import (
 const ServerName = "http-proxy"
 
 type Config struct {
-	ListenOn string
+	ListenOn, AllowTunnelsTo string
 }
 
 var (
-	config Config
+	config                  Config
+	allowedTunnelAddrRegexp *regexp.Regexp
 
 	executableDir  = filepath.Dir(os.Args[0])
 	configFilename = path.Join(executableDir, "config.json")
@@ -102,7 +104,7 @@ func handleTunnel(clientConn *net.TCPConn, serverConn *net.TCPConn) error {
 		if err != nil {
 			log.Println("error on a tunnel: " + err.Error())
 		} else {
-			log.Printf("tunnel side closed, %d copied from %s to %s\n", written,
+			log.Printf("tunnel side closed, %d bytes copied from %s to %s\n", written,
 				serverConn.RemoteAddr(), clientConn.RemoteAddr())
 		}
 	}()
@@ -112,10 +114,30 @@ func handleTunnel(clientConn *net.TCPConn, serverConn *net.TCPConn) error {
 	if err != nil {
 		log.Println("error on a tunnel: " + err.Error())
 	} else {
-		log.Printf("tunnel side closed, %d copied from %s to %s\n", written,
+		log.Printf("tunnel side closed, %d bytes copied from %s to %s\n", written,
 			clientConn.RemoteAddr(), serverConn.RemoteAddr())
 	}
 	return nil
+}
+
+var tunnelAddrSchemeRegexp = regexp.MustCompile(`.+:\d+`)
+
+func tunnelAddrAllowed(addr string) bool {
+	match := tunnelAddrSchemeRegexp.FindStringSubmatch(addr)
+	if match == nil {
+		return false
+	}
+	ips, err := net.LookupIP(match[1])
+	if err != nil {
+		return false
+	}
+	for _, ip := range ips {
+		if !ip.IsGlobalUnicast() {
+			return false
+		}
+	}
+
+	return allowedTunnelAddrRegexp.MatchString(addr)
 }
 
 func handleClient(clientConn net.Conn) (*protocol.Error, bool) {
@@ -128,7 +150,10 @@ func handleClient(clientConn net.Conn) (*protocol.Error, bool) {
 	var addr string
 	if request.Method == protocol.MethodConnect {
 		addr = request.Url
-		// TODO: Check that the address is not local
+		if !tunnelAddrAllowed(addr) {
+			return &protocol.Error{protocol.StatusForbidden,
+				errors.New("This address isn't allowed for CONNECT")}, false
+		}
 	} else {
 		addr, request.Url, err = transformURL(request.Url)
 		if err != nil {
@@ -228,6 +253,10 @@ func main() {
 	err := loadData(configFilename, &config)
 	if err != nil {
 		log.Fatalf("can't load %s\n", configFilename)
+	}
+	allowedTunnelAddrRegexp, err = regexp.Compile(config.AllowTunnelsTo)
+	if err != nil {
+		log.Fatalln("can't compile regexp from AllowTunnelsTo")
 	}
 
 	log.Printf("listening on %s\n", config.ListenOn)

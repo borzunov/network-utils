@@ -1,3 +1,4 @@
 {
-	"ListenOn": ":8080"
+	"ListenOn": ":8080",
+	"AllowTunnelsTo": ".*:443"
 }
