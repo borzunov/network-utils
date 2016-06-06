@@ -26,8 +26,3 @@ type Error struct {
 	Status int
 	Error  error
 }
-
-const (
-	EncodingGzip = "gzip"
-	EncodingZlib = "zlib"
-)

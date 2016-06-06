@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/andybalholm/cascadia"
 	"html/template"
 	"io"
 	"log"
@@ -22,11 +23,18 @@ const ServerName = "http-proxy"
 
 type Config struct {
 	ListenOn, AllowTunnelsTo string
+	RemoveElements           map[string][]string
+}
+
+type URLRule struct {
+	Pattern   *regexp.Regexp
+	Selectors []string
 }
 
 var (
 	config                  Config
 	allowedTunnelAddrRegexp *regexp.Regexp
+	urlRules                []URLRule
 
 	executableDir  = filepath.Dir(os.Args[0])
 	configFilename = path.Join(executableDir, "config.json")
@@ -145,6 +153,7 @@ func handleClient(clientConn net.Conn) (*protocol.Error, bool) {
 		return &protocol.Error{protocol.StatusBadRequest, err}, false
 	}
 
+	url := strings.TrimSpace(request.Url)
 	var addr string
 	if request.Method == protocol.MethodConnect {
 		addr = request.Url
@@ -179,6 +188,10 @@ func handleClient(clientConn net.Conn) (*protocol.Error, bool) {
 
 	response := new(protocol.Response)
 	err = response.ReadFrom(serverConn)
+	if err != nil {
+		return &protocol.Error{protocol.StatusBadGateway, err}, false
+	}
+	err = ModifyResponse(url, response)
 	if err != nil {
 		return &protocol.Error{protocol.StatusBadGateway, err}, false
 	}
@@ -242,14 +255,39 @@ func runHandleClient(clientConn net.Conn) {
 	}
 }
 
-func main() {
+func loadConfig() error {
 	err := loadData(configFilename, &config)
 	if err != nil {
-		log.Fatalf("can't load %s\n", configFilename)
+		return fmt.Errorf("can't load %s: %s", configFilename, err)
 	}
+
 	allowedTunnelAddrRegexp, err = regexp.Compile(config.AllowTunnelsTo)
 	if err != nil {
-		log.Fatalln("can't compile regexp from AllowTunnelsTo")
+		return fmt.Errorf("can't compile a regexp from AllowTunnelsTo: %s", err)
+	}
+
+	for expr, selectors := range config.RemoveElements {
+		pattern, err := regexp.Compile(expr)
+		if err != nil {
+			return fmt.Errorf("can't compile a regexp from RemoveElements: %s", err)
+		}
+		for _, selector := range selectors {
+			_, err := cascadia.Compile(selector)
+			if err != nil {
+				return fmt.Errorf("can't compile a CSS selector: %s", err)
+			}
+		}
+		urlRules = append(urlRules, URLRule{pattern, selectors})
+	}
+
+	log.Println("config checked")
+	return nil
+}
+
+func main() {
+	err := loadConfig()
+	if err != nil {
+		log.Fatalln(err)
 	}
 
 	log.Printf("listening on %s\n", config.ListenOn)
