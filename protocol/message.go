@@ -17,10 +17,19 @@ type Header struct {
 	Key, Value string
 }
 
+type Pipe struct {
+	Reader *io.PipeReader
+	Writer *io.PipeWriter
+}
+
+func NewPipe() *Pipe {
+	r, w := io.Pipe()
+	return &Pipe{r, w}
+}
+
 type MessageBase struct {
-	Headers    []Header
-	BodyReader io.Reader
-	bodyWriter *io.PipeWriter
+	Headers []Header
+	Body    *Pipe
 }
 
 func (message *MessageBase) Header(key string) (string, bool) {
@@ -56,6 +65,16 @@ func (message *MessageBase) Chunked() bool {
 	return ok && strings.EqualFold(value, "chunked")
 }
 
+func (message *MessageBase) SetChunked(value bool) {
+	if value {
+		message.SetHeader("Transfer-Encoding", "chunked")
+		message.DeleteHeader("Content-Length")
+	} else {
+		message.DeleteHeader("Transfer-Encoding")
+		message.SetHeader("Content-Length", "0") // WriteTo will recalculate it
+	}
+}
+
 func filterHeader(headers []Header, key string) []Header {
 	result := make([]Header, 0, len(headers))
 	for _, header := range headers {
@@ -71,7 +90,7 @@ func (message *MessageBase) DeleteHeader(key string) {
 }
 
 func (message *MessageBase) readChunkFrom(reader io.Reader, length int) error {
-	_, err := io.CopyN(message.bodyWriter, reader, int64(length))
+	_, err := io.CopyN(message.Body.Writer, reader, int64(length))
 	return err
 }
 
@@ -144,10 +163,10 @@ func (message *MessageBase) ReadFrom(reader *bufio.Reader) error {
 		}
 		message.Headers = append(message.Headers, Header{parts[0], parts[1]})
 	}
-	message.BodyReader, message.bodyWriter = io.Pipe()
+	message.Body = NewPipe()
 
 	if message.Chunked() {
-		go func() { message.bodyWriter.CloseWithError(message.readChunkedBodyFrom(reader)) }()
+		go func() { message.Body.Writer.CloseWithError(message.readChunkedBodyFrom(reader)) }()
 		return nil
 	}
 
@@ -160,7 +179,7 @@ func (message *MessageBase) ReadFrom(reader *bufio.Reader) error {
 			return errors.New("can't convert Content-Length to integer: " + err.Error())
 		}
 	}
-	go func() { message.bodyWriter.CloseWithError(message.readChunkFrom(reader, length)) }()
+	go func() { message.Body.Writer.CloseWithError(message.readChunkFrom(reader, length)) }()
 	return nil
 }
 
@@ -180,28 +199,30 @@ func (message *MessageBase) setHopByHopHeaders() {
 }
 
 func (message *MessageBase) writeChunkedBodyTo(writer io.Writer) error {
-	for {
-		buf := make([]byte, 4*1024*1024)
-		n, err := message.BodyReader.Read(buf)
-		if n > 0 {
-			err := WriteLine(writer, strconv.FormatUint(uint64(n), 16))
+	if message.Body != nil {
+		for {
+			buf := make([]byte, 4*1024*1024)
+			n, err := message.Body.Reader.Read(buf)
+			if n > 0 {
+				err := WriteLine(writer, strconv.FormatUint(uint64(n), 16))
+				if err != nil {
+					return err
+				}
+				_, err = writer.Write(buf[:n])
+				if err != nil {
+					return err
+				}
+				err = WriteLine(writer, "")
+				if err != nil {
+					return err
+				}
+			}
+			if err == io.EOF {
+				break
+			}
 			if err != nil {
 				return err
 			}
-			_, err = writer.Write(buf[:n])
-			if err != nil {
-				return err
-			}
-			err = WriteLine(writer, "")
-			if err != nil {
-				return err
-			}
-		}
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			return err
 		}
 	}
 	err := WriteLine(writer, "0")
@@ -215,10 +236,12 @@ func (message *MessageBase) writeChunkedBodyTo(writer io.Writer) error {
 func (message *MessageBase) WriteTo(writer io.Writer) error {
 	var body []byte
 	if !message.Chunked() {
-		var err error
-		body, err = ioutil.ReadAll(message.BodyReader)
-		if err != nil {
-			return err
+		if message.Body != nil {
+			var err error
+			body, err = ioutil.ReadAll(message.Body.Reader)
+			if err != nil {
+				return err
+			}
 		}
 		if _, ok := message.Header("Content-Length"); ok {
 			message.SetHeader("Content-Length", strconv.Itoa(len(body)))

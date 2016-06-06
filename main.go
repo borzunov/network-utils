@@ -2,7 +2,6 @@ package main
 
 import (
 	"./protocol"
-	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -87,8 +86,7 @@ func handleTunnel(clientConn *net.TCPConn, serverConn *net.TCPConn) error {
 		Code:     protocol.StatusOK,
 		Reason:   protocol.StatusText[protocol.StatusOK],
 		MessageBase: protocol.MessageBase{
-			Headers:    defaultResponseHeaders(),
-			BodyReader: bytes.NewReader(nil),
+			Headers: defaultResponseHeaders(),
 		},
 	}
 	err := response.WriteTo(clientConn)
@@ -120,7 +118,7 @@ func handleTunnel(clientConn *net.TCPConn, serverConn *net.TCPConn) error {
 	return nil
 }
 
-var tunnelAddrSchemeRegexp = regexp.MustCompile(`.+:\d+`)
+var tunnelAddrSchemeRegexp = regexp.MustCompile(`(.+):\d+`)
 
 func tunnelAddrAllowed(addr string) bool {
 	match := tunnelAddrSchemeRegexp.FindStringSubmatch(addr)
@@ -207,24 +205,19 @@ func sendErrorResponse(clientConn net.Conn, protocolErr *protocol.Error) error {
 		ServerName: ServerName,
 		Config:     config,
 	}
-	body := new(bytes.Buffer)
-	err := errorTemplate.Execute(body, data)
-	if err != nil {
-		return err
-	}
 
 	response := &protocol.Response{
 		Protocol: "HTTP/1.0",
 		Code:     protocolErr.Status,
 		Reason:   reason,
 		MessageBase: protocol.MessageBase{
-			Headers: append(defaultResponseHeaders(), []protocol.Header{
-				{"Content-Type", "text/html"},
-				{"Content-Length", "0"}, // WriteTo will recalculate it
-			}...),
-			BodyReader: body,
+			Headers: append(defaultResponseHeaders(),
+				protocol.Header{"Content-Type", "text/html"}),
+			Body: protocol.NewPipe(),
 		},
 	}
+	response.SetChunked(false)
+	go func() { response.Body.Writer.CloseWithError(errorTemplate.Execute(response.Body.Writer, data)) }()
 	return response.WriteTo(clientConn)
 }
 
