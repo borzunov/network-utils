@@ -88,6 +88,18 @@ func defaultResponseHeaders() []protocol.Header {
 	}
 }
 
+func copyAndClose(dst *net.TCPConn, src *net.TCPConn) {
+	written, err := io.Copy(dst, src)
+	src.CloseRead()
+	dst.CloseWrite()
+	if err != nil {
+		log.Println("error on a tunnel: " + err.Error())
+	} else {
+		log.Printf("tunnel side closed, %d bytes copied from %s to %s\n", written,
+			src.RemoteAddr(), dst.RemoteAddr())
+	}
+}
+
 func handleTunnel(clientConn *net.TCPConn, serverConn *net.TCPConn) error {
 	response := &protocol.Response{
 		Protocol: "HTTP/1.1",
@@ -103,26 +115,8 @@ func handleTunnel(clientConn *net.TCPConn, serverConn *net.TCPConn) error {
 	}
 	log.Printf("established tunnel between %s and %s\n", clientConn.RemoteAddr(), serverConn.RemoteAddr())
 
-	go func() {
-		written, err := io.Copy(clientConn, serverConn)
-		serverConn.CloseRead()
-		clientConn.CloseWrite()
-		if err != nil {
-			log.Println("error on a tunnel: " + err.Error())
-		} else {
-			log.Printf("tunnel side closed, %d bytes copied from %s to %s\n", written,
-				serverConn.RemoteAddr(), clientConn.RemoteAddr())
-		}
-	}()
-	written, err := io.Copy(serverConn, clientConn)
-	clientConn.CloseRead()
-	serverConn.CloseWrite()
-	if err != nil {
-		log.Println("error on a tunnel: " + err.Error())
-	} else {
-		log.Printf("tunnel side closed, %d bytes copied from %s to %s\n", written,
-			clientConn.RemoteAddr(), serverConn.RemoteAddr())
-	}
+	go copyAndClose(clientConn, serverConn)
+	copyAndClose(serverConn, clientConn)
 	return nil
 }
 
