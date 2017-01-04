@@ -1,3 +1,13 @@
+attachments
+
+http-proxy/http-proxy
+ntp-server/ntp-server
+pop3-client/pop3-client
+portscan/portscan
+smtp-client/smtp-client
+traceas/traceas
+
+
 # Created by https://www.gitignore.io/api/go,pycharm
 
 ### Go ###
