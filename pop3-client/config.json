@@ -1,0 +1,7 @@
+{
+	"Host": "pop.yandex.ru",
+	"Port": 110,
+	"Login": "!login!",
+	"Password": "!password!",
+	"AttachmentsDir": "attachments"
+}

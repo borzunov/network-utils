@@ -1,0 +1,9 @@
+{
+	"Subject": "Subject of a letter that is transferred via SMTP",
+	"From": "sender@yandex.ru",
+	"To": ["receiver1@gmail.com", "receiver2@yandex.ru"],
+	"ContentFile": "content.txt",
+	"AttachedFiles": [
+		"attachments/tux.png"
+	]
+}

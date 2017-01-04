@@ -1,0 +1,10 @@
+Hi!
+
+This is a content of a letter that is transferred via SMTP.
+
+It can contain Cyrillic: "Добрый вечер!"
+
+It also correctly escapes a line with one dot:
+.
+
+This letter has several attachments.

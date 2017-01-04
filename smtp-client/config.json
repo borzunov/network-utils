@@ -1,0 +1,6 @@
+{
+	"Host": "smtp.yandex.ru",
+	"Port": 25,
+	"Login": "!login!",
+	"Password": "!password!"
+}

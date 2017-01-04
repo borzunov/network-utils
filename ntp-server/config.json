@@ -1,0 +1,5 @@
+{
+	"ListenOn": "0.0.0.0:123",
+	"Origin": "time.windows.com:123",
+	"SecondsFast": 420
+}
