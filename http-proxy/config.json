@@ -1,0 +1,10 @@
+{
+	"ListenOn": ":8080",
+	"AllowTunnelsTo": ":443$",
+	"RemoveElements": {
+		"^http://(www.)?e1.ru/": [
+			"div[id*='div-gpt-ad']",
+			"script[src*='reklama.e1.ru']"
+		]
+	}
+}
